@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.1
+// @version      1.1.2
 // @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
@@ -852,6 +852,10 @@ if (typeof GM_registerMenuCommand === 'function') {
     let isGifRecording = false;
     let gifCaptureStream = null;
     let gifRecordingBlob = null;
+    let pendingGifPopup = null;
+    const gifDoneChannel = new BroadcastChannel('yt-gif-done-channel');
+    let isGifProcessing = false;
+    let gifProcessingSafetyTimer = null;
 
     // 녹화 시작 당시 영상 제목 저장
     let gifVideoTitle = '';
@@ -1665,8 +1669,31 @@ if (typeof GM_registerMenuCommand === 'function') {
     // F8 움짤 녹화 종료
     // ===========================================================
 
+    function clearGifProcessingState() {
+        isGifProcessing = false;
+
+        pendingGifPopup = null;
+
+        if (gifProcessingSafetyTimer) {
+            clearTimeout(gifProcessingSafetyTimer);
+
+            gifProcessingSafetyTimer = null;
+        }
+
+        updateGifButtonUI();
+    }
+
     function stopGifRecording() {
         if (gifMediaRecorder && gifMediaRecorder.state !== 'inactive') {
+            if (gifSettings.autoGenerate) {
+                isGifProcessing = true;
+
+                updateGifButtonUI();
+
+                // 처리 완료 신호를 못 받는 경우를 대비한 안전장치
+                gifProcessingSafetyTimer = setTimeout(clearGifProcessingState, 120000);
+            }
+
             gifMediaRecorder.stop();
         }
 
@@ -1676,12 +1703,22 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
 
     function toggleGifRecording() {
+        if (isGifProcessing) {
+            return;
+        }
+
         if (isGifRecording) {
             stopGifRecording();
         } else {
             startGifRecording();
         }
     }
+
+    gifDoneChannel.onmessage = (e) => {
+        if (e.data === 'yt-gif-done') {
+            clearGifProcessingState();
+        }
+    };
 
     // ===========================================================
     // F8 종료 후 새 탭 편집창
@@ -1850,7 +1887,16 @@ if (typeof GM_registerMenuCommand === 'function') {
                 'const autoGenerate=' +
                 JSON.stringify(!!autoGenerate) +
                 ';' +
-                'if(autoGenerate){document.body.style.display="none";}' +
+                'if(autoGenerate){v.muted=true;v.style.position="fixed";v.style.left="-9999px";v.style.top="-9999px";v.style.width="1px";v.style.height="1px";v.style.opacity="0";v.style.pointerEvents="none";}' +
+                'function notifyOpener(status){' +
+                'try{' +
+                'new BroadcastChannel("yt-gif-done-channel").postMessage(status);' +
+                '}catch(e){}' +
+                '}' +
+                'async function warmupPlayback(video,start,end){' +
+                'try{await seekTo(video,end);}catch(e){}' +
+                'try{await seekTo(video,start);}catch(e){}' +
+                '}' +
                 // ------------------------------------------------
                 // 파일명
                 // ------------------------------------------------
@@ -2049,13 +2095,6 @@ if (typeof GM_registerMenuCommand === 'function') {
                 '}' +
                 '}' +
                 // ------------------------------------------------
-                // 커스텀 입력
-                // ------------------------------------------------
-
-                'function syncCustom(sel,inp){' +
-                'inp.style.display=sel.value==="custom"?"inline-block":"none";' +
-                '}' +
-                // ------------------------------------------------
                 // 외부 스크립트
                 // ------------------------------------------------
 
@@ -2109,6 +2148,12 @@ if (typeof GM_registerMenuCommand === 'function') {
                 'document.getElementById("lbl").textContent="라이브러리 로딩 중...";' +
                 'document.getElementById("fill").style.width="0%";' +
                 'try{' +
+                'if(autoGenerate){' +
+                'document.getElementById("lbl").textContent="영상 준비 중...";' +
+                'await warmupPlayback(v,start,end);' +
+                'try{v.playbackRate=1;}catch(e){}' +
+                'v.currentTime=start;' +
+                '}' +
                 'const srcW=v.videoWidth,srcH=v.videoHeight;' +
                 'const scale=targetWidth>0?targetWidth/srcW:1;' +
                 'const outW=Math.max(1,Math.round(srcW*scale));' +
@@ -2176,6 +2221,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 'document.getElementById("fill").style.width="100%";' +
                 'document.getElementById("lbl").textContent="완료! 다운로드 폴더를 확인하세요.";' +
                 'document.getElementById("save").disabled=false;' +
+                'notifyOpener("yt-gif-done");' +
                 'if(autoGenerate){setTimeout(()=>window.close(),1200);}' +
                 // =================================================
                 // GIF - 고화질 (gifski)
@@ -2220,6 +2266,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 'document.getElementById("fill").style.width="100%";' +
                 'document.getElementById("lbl").textContent="완료! 다운로드 폴더를 확인하세요.";' +
                 'document.getElementById("save").disabled=false;' +
+                'notifyOpener("yt-gif-done");' +
                 'if(autoGenerate){setTimeout(()=>window.close(),1200);}' +
                 // =================================================
                 // GIF - 일반 (gif.js)
@@ -2263,12 +2310,14 @@ if (typeof GM_registerMenuCommand === 'function') {
                 'URL.revokeObjectURL(workerUrl);' +
                 'document.getElementById("lbl").textContent="완료! 다운로드 폴더를 확인하세요.";' +
                 'document.getElementById("save").disabled=false;' +
+                'notifyOpener("yt-gif-done");' +
                 'if(autoGenerate){setTimeout(()=>window.close(),1200);}' +
                 '});' +
                 'gif.on("abort",()=>{' +
                 'URL.revokeObjectURL(workerUrl);' +
                 'document.getElementById("save").disabled=false;' +
                 'document.getElementById("lbl").textContent="GIF 변환이 중단되었습니다.";' +
+                'notifyOpener("yt-gif-done");' +
                 '});' +
                 'gif.render();' +
                 '}' +
@@ -2277,6 +2326,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 'alert("변환 실패: "+(err&&err.message?err.message:err));' +
                 'document.getElementById("save").disabled=false;' +
                 'document.getElementById("lbl").textContent="변환 실패";' +
+                'notifyOpener("yt-gif-done");' +
                 '}' +
                 '};' +
                 'updateFormatUI();' +
@@ -2354,9 +2404,19 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         if (!btn) return;
 
-        btn.title = isGifRecording
-            ? `움짤 녹화 중지 (클릭 시 편집창 열림) (${gifSettings.keyGif})`
-            : `움짤(GIF/WebP) 녹화 시작 (${gifSettings.keyGif})`;
+        btn.title = isGifProcessing
+            ? '움짤 생성 중...'
+            : isGifRecording
+              ? `움짤 녹화 중지 (클릭 시 편집창 열림) (${gifSettings.keyGif})`
+              : `움짤(GIF/WebP) 녹화 시작 (${gifSettings.keyGif})`;
+
+        btn.disabled = isGifProcessing;
+
+        btn.style.opacity = isGifProcessing ? '0.4' : '1';
+
+        btn.style.pointerEvents = isGifProcessing ? 'none' : '';
+
+        btn.style.cursor = isGifProcessing ? 'not-allowed' : '';
 
         const oldSvg = btn.querySelector('svg');
 
