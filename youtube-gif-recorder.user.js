@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.2
+// @version      1.1.3
 // @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
@@ -333,7 +333,7 @@ function openSettingsPanel() {
         <div style="border-top:1px solid #333;margin:4px 0 16px;padding-top:14px;">
 
             <div style="font-size:13px;font-weight:bold;margin-bottom:10px;color:#aaa;">
-                단축키 설정 (입력칸 클릭 후 원하는 키를 누르세요)
+                단축키 설정 (입력칸 클릭 후 원하는 키를 누르세요. Ctrl+F7처럼 조합키도 가능합니다)
             </div>
 
             <label style="font-size:13px;display:block;margin-bottom:10px;">
@@ -479,8 +479,34 @@ function openSettingsPanel() {
     // 단축키 캡처
     // -------------------------------------------------------
 
-    function normalizeKeyLabel(e) {
-        return e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    function isModifierKey(key) {
+        return key === 'Control' || key === 'Alt' || key === 'Shift' || key === 'Meta';
+    }
+
+    function getKeyComboLabel(e) {
+        const parts = [];
+
+        if (e.ctrlKey) {
+            parts.push('Ctrl');
+        }
+
+        if (e.altKey) {
+            parts.push('Alt');
+        }
+
+        if (e.shiftKey) {
+            parts.push('Shift');
+        }
+
+        if (e.metaKey) {
+            parts.push('Meta');
+        }
+
+        const mainKey = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+
+        parts.push(mainKey);
+
+        return parts.join('+');
     }
 
     function bindKeyCapture(inputEl) {
@@ -504,9 +530,21 @@ function openSettingsPanel() {
 
                 if (e.key === 'Escape') {
                     inputEl.value = original;
-                } else {
-                    inputEl.value = normalizeKeyLabel(e);
+
+                    inputEl.style.color = '#fff';
+
+                    inputEl.dataset.capturing = '';
+
+                    document.removeEventListener('keydown', onKey, true);
+
+                    return;
                 }
+
+                if (isModifierKey(e.key)) {
+                    return;
+                }
+
+                inputEl.value = getKeyComboLabel(e);
 
                 inputEl.style.color = '#fff';
 
@@ -2343,7 +2381,9 @@ if (typeof GM_registerMenuCommand === 'function') {
 
             GM_openInTab(blobUrl, {
                 active: true,
+
                 insert: true,
+
                 setParent: true,
             });
         };
@@ -2869,6 +2909,32 @@ if (typeof GM_registerMenuCommand === 'function') {
     // 단축키
     // ===========================================================
 
+    function getKeyComboLabel(e) {
+        const parts = [];
+
+        if (e.ctrlKey) {
+            parts.push('Ctrl');
+        }
+
+        if (e.altKey) {
+            parts.push('Alt');
+        }
+
+        if (e.shiftKey) {
+            parts.push('Shift');
+        }
+
+        if (e.metaKey) {
+            parts.push('Meta');
+        }
+
+        const mainKey = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+
+        parts.push(mainKey);
+
+        return parts.join('+');
+    }
+
     document.addEventListener('keydown', (e) => {
         const tag = document.activeElement && document.activeElement.tagName;
 
@@ -2879,21 +2945,21 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         if (isTyping) return;
 
-        const pressedKey = e.key.length === 1 ? e.key.toUpperCase() : e.key;
+        const pressedCombo = getKeyComboLabel(e);
 
-        if (pressedKey === gifSettings.keyRecord) {
+        if (pressedCombo === gifSettings.keyRecord) {
             e.preventDefault();
 
             toggleRecording();
-        } else if (pressedKey === gifSettings.keyScreenshot) {
+        } else if (pressedCombo === gifSettings.keyScreenshot) {
             e.preventDefault();
 
             takeScreenshot();
-        } else if (pressedKey === gifSettings.keyGif) {
+        } else if (pressedCombo === gifSettings.keyGif) {
             e.preventDefault();
 
             toggleGifRecording();
-        } else if (pressedKey === gifSettings.keyCrop) {
+        } else if (pressedCombo === gifSettings.keyCrop) {
             e.preventDefault();
 
             toggleCropMode();
