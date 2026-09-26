@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.3
+// @version      1.1.4
 // @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
@@ -1741,10 +1741,6 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
 
     function toggleGifRecording() {
-        if (isGifProcessing) {
-            return;
-        }
-
         if (isGifRecording) {
             stopGifRecording();
         } else {
@@ -2449,14 +2445,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             : isGifRecording
               ? `움짤 녹화 중지 (클릭 시 편집창 열림) (${gifSettings.keyGif})`
               : `움짤(GIF/WebP) 녹화 시작 (${gifSettings.keyGif})`;
-
-        btn.disabled = isGifProcessing;
-
-        btn.style.opacity = isGifProcessing ? '0.4' : '1';
-
-        btn.style.pointerEvents = isGifProcessing ? 'none' : '';
-
-        btn.style.cursor = isGifProcessing ? 'not-allowed' : '';
 
         const oldSvg = btn.querySelector('svg');
 
