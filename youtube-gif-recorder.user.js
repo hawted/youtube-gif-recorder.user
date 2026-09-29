@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.5
+// @version      1.1.6
 // @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
@@ -880,7 +880,6 @@ if (typeof GM_registerMenuCommand === 'function') {
     let recordedChunks = [];
     let isRecording = false;
     let captureStream = null;
-    const MAX_RECORD_BYTES = 50 * 1000 * 1000;
 
     // ===========================================================
     // F8 움짤 녹화
@@ -1530,45 +1529,45 @@ if (typeof GM_registerMenuCommand === 'function') {
             return;
         }
 
-const recordingChannelName = getChannelName();
-const videoBps = getBitrateForVideo(video);
-const audioBps = 192000;
-const marginBytes = ((videoBps + audioBps) / 8) * 3;
-function startSegment() {
-    let segmentChunks = [];
-    let segmentSize = 0;
-    let rotating = false;
-    const recorder = new MediaRecorder(captureStream, {
-        mimeType,
-        videoBitsPerSecond: videoBps,
-        audioBitsPerSecond: audioBps,
-    });
-    mediaRecorder = recorder;
-    recorder.ondataavailable = (e) => {
-        if (!e.data || e.data.size === 0) return;
-        segmentChunks.push(e.data);
-        segmentSize += e.data.size;
-        if (isRecording && !rotating && recorder.state === 'recording' && segmentSize + marginBytes >= MAX_RECORD_BYTES) {
-            rotating = true;
-            recorder.stop();
-        }
-    };
-    recorder.onstop = () => {
-        const blob = new Blob(segmentChunks, { type: mimeType });
-        downloadBlob(blob, makeVideoFileName('녹화', extFromMime(mimeType), recordingChannelName));
-        if (isRecording) {
-            startSegment();
-            return;
-        }
-        captureStream = null;
-        if (activeCropStreamStop) {
-            activeCropStreamStop();
-            activeCropStreamStop = null;
-        }
-    };
-    recorder.start(1000);
-}
-startSegment();
+        recordedChunks = [];
+
+        /*
+         * 일반 녹화도 녹화 시작 시점의 제목을 기억한다.
+         * 녹화 도중 페이지 제목이 바뀌어도 파일명은 동일하게 유지.
+         */
+        const recordingChannelName = getChannelName();
+
+        mediaRecorder = new MediaRecorder(captureStream, {
+            mimeType,
+            videoBitsPerSecond: getBitrateForVideo(video),
+            audioBitsPerSecond: 192000,
+        });
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) {
+                recordedChunks.push(e.data);
+            }
+        };
+
+        mediaRecorder.onstop = () => {
+            const ext = extFromMime(mimeType);
+
+            const blob = new Blob(recordedChunks, {
+                type: mimeType,
+            });
+
+            downloadBlob(blob, makeVideoFileName('녹화', ext, recordingChannelName));
+
+            captureStream = null;
+
+            if (activeCropStreamStop) {
+                activeCropStreamStop();
+
+                activeCropStreamStop = null;
+            }
+        };
+
+        mediaRecorder.start();
 
         isRecording = true;
 
