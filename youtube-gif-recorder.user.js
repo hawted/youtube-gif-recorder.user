@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.6
+// @version      1.1.7
 // @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
@@ -848,12 +848,6 @@ if (typeof GM_registerMenuCommand === 'function') {
         const pad = (n, length = 2) => String(n).padStart(length, '0');
 
         return (
-            now.getFullYear() +
-            '-' +
-            pad(now.getMonth() + 1) +
-            '-' +
-            pad(now.getDate()) +
-            '_' +
             pad(now.getHours()) +
             '-' +
             pad(now.getMinutes()) +
@@ -1553,7 +1547,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             const ext = extFromMime(mimeType);
 
             const blob = new Blob(recordedChunks, {
-                type: mimeType,
+                type: mimeType.split(';')[0],
             });
 
             downloadBlob(blob, makeVideoFileName('녹화', ext, recordingChannelName));
@@ -1673,9 +1667,8 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         gifMediaRecorder.onstop = () => {
             gifRecordingBlob = new Blob(gifRecordedChunks, {
-                type: mimeType,
+                type: mimeType.split(';')[0],
             });
-
             gifCaptureStream = null;
 
             if (activeGifCropStreamStop) {
@@ -1929,7 +1922,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 'function getFileTimestamp(){' +
                 'const now=new Date();' +
                 'const pad=(n,length=2)=>String(n).padStart(length,"0");' +
-                'return now.getFullYear()+"-"+pad(now.getMonth()+1)+"-"+pad(now.getDate())+"_"+pad(now.getHours())+"-"+pad(now.getMinutes())+"-"+pad(now.getSeconds())+"-"+pad(now.getMilliseconds(),3);' +
+                'return pad(now.getHours())+"-"+pad(now.getMinutes())+"-"+pad(now.getSeconds())+"-"+pad(now.getMilliseconds(),3);' +
                 '}' +
                 'function makeFileName(type,extension){' +
                 'let title=videoTitle||"YouTube";' +
