@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.8
+// @version      1.1.9
 // @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처. 녹화 형식(mp4/webm), 녹화 FPS(30/60) 선택 지원.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS = {
     autoGenerate: false,
     bitrateMbps: 4,
     recFps: 30, // 30 | 60 (일반 녹화 프레임 속도)
+    recMaxHeight: 2160, // 1080 | 1440 | 2160
     keyRecord: 'F9',
     keyScreenshot: 'F10',
     keyGif: 'F8',
@@ -78,6 +79,7 @@ function loadSettings() {
                     : DEFAULT_SETTINGS.bitrateMbps,
 
             recFps: Number(p.recFps) === 60 ? 60 : 30,
+            recMaxHeight: [720, 1080, 1440, 2160].includes(Number(p.recMaxHeight)) ? Number(p.recMaxHeight) : DEFAULT_SETTINGS.recMaxHeight,
 
             keyRecord:
                 typeof p.keyRecord === 'string' && p.keyRecord
@@ -369,6 +371,13 @@ function openSettingsPanel() {
                 </select>
             </label>
 
+            <label style="font-size:13px;display:block;margin-bottom:10px;">
+                최대 녹화 화질 <span style="color:#888;font-weight:normal;">(시청 화질이 더 높으면 이 값으로 축소)</span>
+                <select id="yt-gif-setting-rec-maxh" style="display:block;margin-top:4px;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;">
+                    ${[720, 1080, 1440, 2160].map((v) => `<option value="${v}"${v === gifSettings.recMaxHeight ? ' selected' : ''}>${v}p</option>`).join('')}
+                </select>
+            </label>
+
             <label style="font-size:13px;display:block;margin-bottom:6px;">
                 녹화 비트레이트 <span style="color:#888;font-weight:normal;">(움짤은 항상 원본 화질)</span>
 
@@ -619,6 +628,7 @@ function openSettingsPanel() {
             panel.querySelector('#yt-gif-setting-gifquality').value === 'high' ? 'high' : 'normal';
 
         const recFps = parseInt(recFpsSelect.value, 10) === 60 ? 60 : 30;
+        const recMaxHeight = parseInt(panel.querySelector('#yt-gif-setting-rec-maxh').value, 10) || 2160;
 
         const keyRecord = keyRecordInput.value;
 
@@ -694,6 +704,7 @@ function openSettingsPanel() {
             autoGenerate,
             bitrateMbps,
             recFps,
+            recMaxHeight,
             keyRecord,
             keyScreenshot,
             keyGif,
@@ -1007,7 +1018,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             return Math.round(gifSettings.bitrateMbps * 1000000);
         }
 
-        const h = video.videoHeight || 0;
+        const h = forceAuto ? video.videoHeight || 0 : Math.min(video.videoHeight || 0, gifSettings.recMaxHeight);
 
         if (h >= 2160) {
             return 40000000;
@@ -1143,7 +1154,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     // fps가 지정되면 draw()가 해당 프레임 속도로만 그리도록 제한한다.
     // ===========================================================
 
-    function createCroppedStream(video, ratioRegion, fps) {
+    function createCroppedStream(video, ratioRegion, fps, maxHeight) {
         const initialRegion = getCropPixelRegion(video) || {
             x: 0,
             y: 0,
@@ -1156,11 +1167,11 @@ if (typeof GM_registerMenuCommand === 'function') {
         // 캔버스(출력) 크기는 녹화 시작 시점 해상도로 고정한다.
         // 화질이 바뀌어도 소스 영역만 비율에 맞춰 재계산해서
         // 이 고정된 캔버스 크기로 스케일링해 그린다.
-        canvas.width = initialRegion.width;
-
-        canvas.height = initialRegion.height;
-
-        const ctx = canvas.getContext('2d');
+        const outScale = maxHeight && video.videoHeight > maxHeight ? maxHeight / video.videoHeight : 1;
+        canvas.width = Math.max(2, Math.round(initialRegion.width * outScale) & ~1);
+        canvas.height = Math.max(2, Math.round(initialRegion.height * outScale) & ~1);
+         const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingQuality = 'high';
 
         let rafId = null;
 
@@ -1527,8 +1538,9 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         const recFps = gifSettings.recFps === 60 ? 60 : 30;
 
-        if (cropRegion || recFps === 30) {
-            const cropped = createCroppedStream(video, cropRegion || { xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1 }, recFps);
+        const maxH = gifSettings.recMaxHeight;
+        if (cropRegion || recFps === 30 || video.videoHeight > maxH) {
+            const cropped = createCroppedStream(video, cropRegion || { xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1 }, recFps, maxH);
 
             captureStream = cropped.stream;
 
