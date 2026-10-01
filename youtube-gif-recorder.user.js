@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.7
-// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
+// @version      1.1.8
+// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처. 녹화 형식(mp4/webm), 녹화 FPS(30/60) 선택 지원.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
 // @match        https://chzzk.naver.com/*
@@ -29,6 +29,7 @@ const DEFAULT_SETTINGS = {
     gifQuality: 'normal', // 'normal' | 'high'(gifski)
     autoGenerate: false,
     bitrateMbps: 4,
+    recFps: 30, // 30 | 60 (일반 녹화 프레임 속도)
     keyRecord: 'F9',
     keyScreenshot: 'F10',
     keyGif: 'F8',
@@ -75,6 +76,8 @@ function loadSettings() {
                         ? 'auto'
                         : Number(p.bitrateMbps)
                     : DEFAULT_SETTINGS.bitrateMbps,
+
+            recFps: Number(p.recFps) === 60 ? 60 : 30,
 
             keyRecord:
                 typeof p.keyRecord === 'string' && p.keyRecord
@@ -164,6 +167,13 @@ function buildBitrateOptionsHtml(selected) {
     html += `<option value="custom"${selected !== 'auto' && !BITRATE_PRESETS.includes(selected) ? ' selected' : ''}>직접 입력</option>`;
 
     return html;
+}
+
+function buildRecFpsOptionsHtml(selected) {
+    return (
+        `<option value="30"${selected !== 60 ? ' selected' : ''}>30 fps</option>` +
+        `<option value="60"${selected === 60 ? ' selected' : ''}>60 fps</option>`
+    );
 }
 
 function buildWebpCompressionOptionsHtml(lossless) {
@@ -348,6 +358,17 @@ function openSettingsPanel() {
                 />
             </label>
 
+            <label style="font-size:13px;display:block;margin-bottom:10px;">
+                녹화 프레임 속도
+
+                <select
+                    id="yt-gif-setting-rec-fps"
+                    style="display:block;margin-top:4px;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;"
+                >
+                    ${buildRecFpsOptionsHtml(gifSettings.recFps)}
+                </select>
+            </label>
+
             <label style="font-size:13px;display:block;margin-bottom:6px;">
                 녹화 비트레이트 <span style="color:#888;font-weight:normal;">(움짤은 항상 원본 화질)</span>
 
@@ -468,6 +489,8 @@ function openSettingsPanel() {
     const bitrateSelect = panel.querySelector('#yt-gif-setting-bitrate');
 
     const bitrateCustomInput = panel.querySelector('#yt-gif-setting-bitrate-custom');
+
+    const recFpsSelect = panel.querySelector('#yt-gif-setting-rec-fps');
 
     function updateBitrateCustomUI() {
         bitrateCustomInput.style.display = bitrateSelect.value === 'custom' ? 'block' : 'none';
@@ -595,6 +618,8 @@ function openSettingsPanel() {
         const gifQuality =
             panel.querySelector('#yt-gif-setting-gifquality').value === 'high' ? 'high' : 'normal';
 
+        const recFps = parseInt(recFpsSelect.value, 10) === 60 ? 60 : 30;
+
         const keyRecord = keyRecordInput.value;
 
         const keyScreenshot = keyScreenshotInput.value;
@@ -668,6 +693,7 @@ function openSettingsPanel() {
             gifQuality,
             autoGenerate,
             bitrateMbps,
+            recFps,
             keyRecord,
             keyScreenshot,
             keyGif,
@@ -944,19 +970,24 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     // ===========================================================
     // 일반 녹화 MIME
+    // preferred: 'webm' 이면 webm 우선, 그 외(미지정 포함)는 mp4 우선
+    // 선택한 형식이 지원되지 않으면 나머지 형식으로 폴백한다.
     // ===========================================================
 
-    function pickMimeType() {
-        const candidates = [
+    function pickMimeType(preferred) {
+        const mp4Candidates = [
             'video/mp4;codecs=avc1.640028,mp4a.40.2',
             'video/mp4;codecs=avc1.4d0028,mp4a.40.2',
             'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
             'video/mp4;codecs=avc1,mp4a.40.2',
-
-            'video/webm;codecs=vp9,opus',
-
-            'video/webm',
         ];
+
+        const webmCandidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+
+        const candidates =
+            preferred === 'webm'
+                ? [...webmCandidates, ...mp4Candidates]
+                : [...mp4Candidates, ...webmCandidates];
 
         for (const type of candidates) {
             if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) {
@@ -1109,6 +1140,7 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     // ===========================================================
     // OCR 영역(크롭) 캡처 스트림 생성
+    // fps가 지정되면 draw()가 해당 프레임 속도로만 그리도록 제한한다.
     // ===========================================================
 
     function createCroppedStream(video, ratioRegion, fps) {
@@ -1132,7 +1164,19 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         let rafId = null;
 
-        function draw() {
+        let lastDrawTime = 0;
+
+        const frameInterval = fps ? 1000 / fps : 0;
+
+        function draw(now) {
+            rafId = requestAnimationFrame(draw);
+
+            if (frameInterval && now - lastDrawTime < frameInterval * 0.5) {
+                return;
+            }
+
+            lastDrawTime = now;
+
             try {
                 const vw = video.videoWidth || initialRegion.width;
 
@@ -1150,11 +1194,9 @@ if (typeof GM_registerMenuCommand === 'function') {
             } catch (e) {
                 // 프레임 드로잉 실패는 무시하고 다음 프레임 시도
             }
-
-            rafId = requestAnimationFrame(draw);
         }
 
-        draw();
+        draw(performance.now());
 
         const canvasStream = fps ? canvas.captureStream(fps) : canvas.captureStream();
 
@@ -1483,8 +1525,10 @@ if (typeof GM_registerMenuCommand === 'function') {
             return;
         }
 
-        if (cropRegion) {
-            const cropped = createCroppedStream(video, cropRegion, 30);
+        const recFps = gifSettings.recFps === 60 ? 60 : 30;
+
+        if (cropRegion || recFps === 30) {
+            const cropped = createCroppedStream(video, cropRegion || { xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1 }, recFps);
 
             captureStream = cropped.stream;
 
@@ -1500,16 +1544,13 @@ if (typeof GM_registerMenuCommand === 'function') {
                 return;
             }
         } else {
-            try {
-                captureStream = video.captureStream();
-            } catch (err) {
-                alert('영상 캡처에 실패했습니다: ' + err.message);
-
-                return;
-            }
+            captureStream = video.captureStream();
+            activeCropStreamStop = null;
 
             if (captureStream.getVideoTracks().length === 0) {
                 alert('비디오 트랙을 가져오지 못했습니다.');
+
+                activeCropStreamStop = null;
 
                 return;
             }
@@ -1519,6 +1560,12 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         if (!mimeType) {
             alert('이 브라우저는 MediaRecorder를 지원하지 않습니다.');
+
+            if (activeCropStreamStop) {
+                activeCropStreamStop();
+
+                activeCropStreamStop = null;
+            }
 
             return;
         }
@@ -1534,8 +1581,17 @@ if (typeof GM_registerMenuCommand === 'function') {
         mediaRecorder = new MediaRecorder(captureStream, {
             mimeType,
             videoBitsPerSecond: getBitrateForVideo(video),
-            audioBitsPerSecond: 192000,
+            audioBitsPerSecond: 128000,
         });
+
+        console.log(
+            '[녹화] mime:',
+            mimeType,
+            'fps:',
+            recFps,
+            'videoBPS:',
+            mediaRecorder.videoBitsPerSecond,
+        );
 
         mediaRecorder.ondataavailable = (e) => {
             if (e.data && e.data.size > 0) {
