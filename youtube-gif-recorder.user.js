@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.9
+// @version      1.1.10
 // @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처. 녹화 형식(mp4/webm), 녹화 FPS(30/60) 선택 지원.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
@@ -108,6 +108,22 @@ function saveSettings(s) {
 
 let gifSettings = loadSettings();
 
+function loadSavedPreset(slot) {
+    try {
+        const raw = GM_getValue('yt-gif-preset-' + slot, null);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        // 이전 버전에서 설정 객체만 저장한 프리셋도 그대로 지원한다.
+        return parsed.settings ? parsed : { name: slot + '번', settings: parsed };
+    } catch (e) {
+        return null;
+    }
+}
+
+function saveCurrentPreset(slot, name) {
+    GM_setValue('yt-gif-preset-' + slot, JSON.stringify({ name, settings: gifSettings }));
+}
+
 // ===============================================================
 // Select 옵션 생성
 // ===============================================================
@@ -160,10 +176,20 @@ function buildFormatOptionsHtml(selected) {
 function buildBitrateOptionsHtml(selected) {
     let html = '';
 
-    html += `<option value="auto"${selected === 'auto' ? ' selected' : ''}>자동(해상도별)</option>`;
+    html += `<option value="auto"${selected === 'auto' ? ' selected' : ''}>자동(해상도·FPS별 추천)</option>`;
+
+    const labels = {
+        1: '저화질·저용량 (1 Mbps)',
+        2: '커뮤니티용 (2 Mbps)',
+        3: '균형 (3 Mbps)',
+        4: '표준 (4 Mbps)',
+        8: '고화질 (8 Mbps)',
+        12: '최고화질 (12 Mbps)',
+        20: '초고화질 (20 Mbps)',
+    };
 
     BITRATE_PRESETS.forEach((v) => {
-        html += `<option value="${v}"${v === selected ? ' selected' : ''}>${v} Mbps</option>`;
+        html += `<option value="${v}"${v === selected ? ' selected' : ''}>${labels[v] || v + ' Mbps'}</option>`;
     });
 
     html += `<option value="custom"${selected !== 'auto' && !BITRATE_PRESETS.includes(selected) ? ' selected' : ''}>직접 입력</option>`;
@@ -233,6 +259,26 @@ function openSettingsPanel() {
         <h2 style="margin:0 0 14px;font-size:16px;">
             움짤(GIF/WebP) 기본값 설정
         </h2>
+
+        <div style="margin-bottom:16px;padding:10px;border:1px solid #333;border-radius:8px;">
+            <div style="font-size:12px;color:#bbb;margin-bottom:8px;">설정 프리셋</div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">
+                ${[1, 2, 3]
+                    .map(
+                        (slot) =>
+                            `<button type="button" id="yt-gif-preset-load-${slot}" style="padding:6px;background:#292929;color:#fff;border:1px solid #555;border-radius:4px;cursor:pointer;">${slot}번 불러오기</button>`,
+                    )
+                    .join('')}
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px;">
+                ${[1, 2, 3]
+                    .map(
+                        (slot) =>
+                            `<button type="button" id="yt-gif-preset-save-${slot}" style="padding:6px;background:#202f3d;color:#fff;border:1px solid #4d7391;border-radius:4px;cursor:pointer;">${slot}번에 저장</button>`,
+                    )
+                    .join('')}
+            </div>
+        </div>
 
         <label style="font-size:13px;display:block;margin-bottom:10px;">
             기본 FPS
@@ -605,6 +651,53 @@ function openSettingsPanel() {
 
     bindKeyCapture(keyCropInput);
 
+    const applyPresetToPanel = (preset) => {
+        if (!preset) {
+            alert('저장된 프리셋이 없습니다.');
+            return;
+        }
+
+        const settings = preset.settings;
+
+        panel.querySelector('#yt-gif-setting-fps').value = settings.fps;
+        panel.querySelector('#yt-gif-setting-width').value = settings.width;
+        panel.querySelector('#yt-gif-setting-quality').value = settings.quality;
+        formatSelect.value = settings.format;
+        webpSelect.value = settings.webpLossless ? 'lossless' : 'lossy';
+        gifQualitySelect.value = settings.gifQuality;
+        panel.querySelector('#yt-gif-setting-auto').checked = settings.autoGenerate;
+        bitrateSelect.value = settings.bitrateMbps === 'auto' ? 'auto' : String(settings.bitrateMbps);
+        bitrateCustomInput.value = typeof settings.bitrateMbps === 'number' ? settings.bitrateMbps : 4;
+        recFpsSelect.value = String(settings.recFps);
+        panel.querySelector('#yt-gif-setting-rec-maxh').value = settings.recMaxHeight;
+        keyRecordInput.value = settings.keyRecord;
+        keyScreenshotInput.value = settings.keyScreenshot;
+        keyGifInput.value = settings.keyGif;
+        keyCropInput.value = settings.keyCrop;
+        formatSelect.dispatchEvent(new Event('change'));
+        bitrateSelect.dispatchEvent(new Event('change'));
+        alert('프리셋을 불러왔습니다. 적용하려면 아래 저장 버튼을 누르세요.');
+    };
+
+    [1, 2, 3].forEach((slot) => {
+        const saved = loadSavedPreset(slot);
+        if (saved) {
+            panel.querySelector('#yt-gif-preset-load-' + slot).textContent = saved.name + ' 불러오기';
+        }
+        panel.querySelector('#yt-gif-preset-load-' + slot).addEventListener('click', () => {
+            applyPresetToPanel(loadSavedPreset(slot));
+        });
+        panel.querySelector('#yt-gif-preset-save-' + slot).addEventListener('click', () => {
+            const current = loadSavedPreset(slot);
+            const name = prompt(slot + '번 프리셋 이름을 입력하세요.', current ? current.name : '');
+            if (name === null) return;
+            const trimmedName = name.trim() || slot + '번';
+            saveCurrentPreset(slot, trimmedName);
+            panel.querySelector('#yt-gif-preset-load-' + slot).textContent = trimmedName + ' 불러오기';
+            alert(trimmedName + ' 프리셋으로 저장했습니다.');
+        });
+    });
+
     overlay.addEventListener('click', (e) => {
         if (e.target === overlay) {
             overlay.remove();
@@ -911,6 +1004,120 @@ if (typeof GM_registerMenuCommand === 'function') {
     let recordedChunks = [];
     let isRecording = false;
     let captureStream = null;
+    let captureStats = null;
+    let directFrameStatsStop = null;
+
+    function startDirectFrameStats(video) {
+        let frames = 0;
+        let active = true;
+        let callbackId = null;
+
+        const countFrame = () => {
+            if (!active) return;
+            frames += 1;
+            callbackId = video.requestVideoFrameCallback(countFrame);
+        };
+
+        if (typeof video.requestVideoFrameCallback !== 'function') {
+            return null;
+        }
+
+        callbackId = video.requestVideoFrameCallback(countFrame);
+
+        return {
+            getStats: () => ({ drawnFrames: frames }),
+            stop: () => {
+                active = false;
+                if (callbackId !== null && typeof video.cancelVideoFrameCallback === 'function') {
+                    video.cancelVideoFrameCallback(callbackId);
+                    callbackId = null;
+                }
+            },
+        };
+    }
+    let captureDimensions = null;
+    let recordingHudEl = null;
+    let recordingHudInterval = null;
+    let recordingHudStartedAt = 0;
+
+    function formatHudElapsed(ms) {
+        const total = Math.max(0, ms) / 1000;
+        const minutes = Math.floor(total / 60);
+        const seconds = Math.floor(total % 60);
+        const hundredths = Math.floor((total % 1) * 100);
+        return String(minutes).padStart(2, '0') + ':' +
+            String(seconds).padStart(2, '0') + '.' +
+            String(hundredths).padStart(2, '0');
+    }
+
+    function formatHudBytes(bytes) {
+        if (bytes < 1024 * 1024) {
+            return (bytes / 1024).toFixed(1) + ' KB';
+        }
+        return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+    }
+
+    function removeRecordingHud() {
+        if (recordingHudInterval) {
+            clearInterval(recordingHudInterval);
+            recordingHudInterval = null;
+        }
+        if (recordingHudEl) {
+            recordingHudEl.remove();
+            recordingHudEl = null;
+        }
+        recordingHudStartedAt = 0;
+    }
+
+    function showRecordingHud(kind, video, details) {
+        removeRecordingHud();
+
+        const hud = document.createElement('div');
+        hud.id = 'yt-gif-recording-hud';
+        hud.style.cssText = [
+            'position:fixed', 'z-index:2147483647', 'display:block',
+            'padding:8px 10px', 'border-radius:6px', 'background:rgba(0,0,0,.82)',
+            'color:#fff', 'font:600 12px/1.45 Arial,sans-serif',
+            'white-space:nowrap', 'pointer-events:none', 'box-shadow:0 2px 8px rgba(0,0,0,.4)',
+        ].join(';');
+        document.body.appendChild(hud);
+        recordingHudEl = hud;
+        recordingHudStartedAt = Date.now();
+
+        const update = () => {
+            if (!recordingHudEl || !document.documentElement.contains(recordingHudEl)) {
+                removeRecordingHud();
+                return;
+            }
+            const rect = video.getBoundingClientRect();
+            hud.style.left = Math.max(8, Math.min(window.innerWidth - 220, rect.left + 8)) + 'px';
+            hud.style.top = Math.max(8, rect.top + 8) + 'px';
+            const elapsedMs = Date.now() - recordingHudStartedAt;
+            const elapsed = formatHudElapsed(elapsedMs);
+            while (hud.firstChild) {
+                hud.removeChild(hud.firstChild);
+            }
+            const addLine = (text, color = '#fff') => {
+                const line = document.createElement('div');
+                line.textContent = text;
+                line.style.color = color;
+                hud.appendChild(line);
+            };
+            const measuredFps = details.getFps ? details.getFps(elapsedMs) : null;
+            const targetFps = details.targetFps || 60;
+            const redThreshold = targetFps * 0.8;
+            const yellowThreshold = targetFps * 0.92;
+            const fpsColor = measuredFps !== null && measuredFps < redThreshold ? '#ff4d4d' : measuredFps !== null && measuredFps < yellowThreshold ? '#ffd24d' : kind === 'GIF' ? '#ffb347' : '#58e06f';
+            addLine('● ' + kind, fpsColor);
+            addLine(typeof details.line1 === 'function' ? details.line1(measuredFps) : details.line1);
+            if (details.line2) {
+                addLine(typeof details.line2 === 'function' ? details.line2() : details.line2);
+            }
+            addLine(elapsed);
+        };
+        update();
+        recordingHudInterval = setInterval(update, 150);
+    }
 
     // ===========================================================
     // F8 움짤 녹화
@@ -1013,24 +1220,16 @@ if (typeof GM_registerMenuCommand === 'function') {
         return mime.includes('mp4') ? 'mp4' : 'webm';
     }
 
-    function getBitrateForVideo(video, forceAuto = false) {
+    function getBitrateForVideo(video, forceAuto = false, fps = 30) {
         if (!forceAuto && gifSettings.bitrateMbps !== 'auto') {
             return Math.round(gifSettings.bitrateMbps * 1000000);
         }
 
         const h = forceAuto ? video.videoHeight || 0 : Math.min(video.videoHeight || 0, gifSettings.recMaxHeight);
 
-        if (h >= 2160) {
-            return 40000000;
-        } else if (h >= 1440) {
-            return 20000000;
-        } else if (h >= 1080) {
-            return 12000000;
-        } else if (h >= 720) {
-            return 8000000;
-        } else {
-            return 4000000;
-        }
+        let bitrate = h >= 2160 ? 20000000 : h >= 1440 ? 12000000 : h >= 1080 ? 6000000 : h >= 720 ? 3500000 : 2000000;
+        if (fps >= 60) bitrate = Math.round(bitrate * 1.35);
+        return bitrate;
     }
 
     // ===========================================================
@@ -1174,19 +1373,25 @@ if (typeof GM_registerMenuCommand === 'function') {
         ctx.imageSmoothingQuality = 'high';
 
         let rafId = null;
+        let videoFrameCallbackId = null;
+        let stopped = false;
+        let drawnFrames = 0;
 
-        let lastDrawTime = 0;
+        let lastMediaTime = -Infinity;
 
-        const frameInterval = fps ? 1000 / fps : 0;
+        const mediaFrameInterval = fps ? 1 / fps : 0;
 
-        function draw(now) {
-            rafId = requestAnimationFrame(draw);
+        function drawFrame(mediaTime) {
+            if (stopped) return;
 
-            if (frameInterval && now - lastDrawTime < frameInterval * 0.5) {
+            // 실제 영상 시간 기준으로 처리한다. 화면 주사율에 의존하지 않으므로
+            // 60Hz/120Hz 모니터에서 프레임이 불필요하게 중복되거나 건너뛰지 않는다.
+            if (mediaFrameInterval && mediaTime - lastMediaTime < mediaFrameInterval * 0.98) {
                 return;
             }
 
-            lastDrawTime = now;
+            lastMediaTime = mediaTime;
+            drawnFrames += 1;
 
             try {
                 const vw = video.videoWidth || initialRegion.width;
@@ -1207,7 +1412,25 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
         }
 
-        draw(performance.now());
+        function onVideoFrame(now, metadata) {
+            const mediaTime = typeof metadata.mediaTime === 'number' ? metadata.mediaTime : video.currentTime;
+            drawFrame(mediaTime);
+            if (!stopped) {
+                videoFrameCallbackId = video.requestVideoFrameCallback(onVideoFrame);
+            }
+        }
+
+        if (typeof video.requestVideoFrameCallback === 'function') {
+            drawFrame(video.currentTime || 0);
+            videoFrameCallbackId = video.requestVideoFrameCallback(onVideoFrame);
+        } else {
+            const drawWithRaf = (now) => {
+                if (stopped) return;
+                drawFrame(now / 1000);
+                rafId = requestAnimationFrame(drawWithRaf);
+            };
+            rafId = requestAnimationFrame(drawWithRaf);
+        }
 
         const canvasStream = fps ? canvas.captureStream(fps) : canvas.captureStream();
 
@@ -1223,13 +1446,21 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         return {
             stream: combined,
+            width: canvas.width,
+            height: canvas.height,
             stop: () => {
+                stopped = true;
                 if (rafId) {
                     cancelAnimationFrame(rafId);
 
                     rafId = null;
                 }
+                if (videoFrameCallbackId !== null && typeof video.cancelVideoFrameCallback === 'function') {
+                    video.cancelVideoFrameCallback(videoFrameCallbackId);
+                    videoFrameCallbackId = null;
+                }
             },
+            getStats: () => ({ drawnFrames }),
         };
     }
 
@@ -1539,10 +1770,15 @@ if (typeof GM_registerMenuCommand === 'function') {
         const recFps = gifSettings.recFps === 60 ? 60 : 30;
 
         const maxH = gifSettings.recMaxHeight;
+        // 60fps 전체 화면 녹화는 캔버스를 거치지 않고 원본 video 스트림을
+        // 직접 사용한다. 캔버스 복사/재인코딩을 줄여 프레임 드랍을 완화한다.
+        // 크롭, 해상도 제한, 30fps 변환이 필요한 경우에만 캔버스를 사용한다.
         if (cropRegion || recFps === 30 || video.videoHeight > maxH) {
             const cropped = createCroppedStream(video, cropRegion || { xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1 }, recFps, maxH);
 
             captureStream = cropped.stream;
+            captureStats = cropped.getStats;
+            captureDimensions = { width: cropped.width, height: cropped.height };
 
             activeCropStreamStop = cropped.stop;
 
@@ -1557,6 +1793,10 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
         } else {
             captureStream = video.captureStream();
+            const directStats = startDirectFrameStats(video);
+            captureStats = directStats ? directStats.getStats : null;
+            directFrameStatsStop = directStats ? directStats.stop : null;
+            captureDimensions = { width: video.videoWidth, height: video.videoHeight };
             activeCropStreamStop = null;
 
             if (captureStream.getVideoTracks().length === 0) {
@@ -1592,7 +1832,7 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         mediaRecorder = new MediaRecorder(captureStream, {
             mimeType,
-            videoBitsPerSecond: getBitrateForVideo(video),
+            videoBitsPerSecond: getBitrateForVideo(video, false, recFps),
             audioBitsPerSecond: 128000,
         });
 
@@ -1611,7 +1851,18 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
         };
 
+        mediaRecorder.onerror = () => {
+            removeRecordingHud();
+            if (directFrameStatsStop) {
+                directFrameStatsStop();
+                directFrameStatsStop = null;
+            }
+            isRecording = false;
+            updateButtonUI();
+        };
+
         mediaRecorder.onstop = () => {
+            removeRecordingHud();
             const ext = extFromMime(mimeType);
 
             const blob = new Blob(recordedChunks, {
@@ -1621,6 +1872,12 @@ if (typeof GM_registerMenuCommand === 'function') {
             downloadBlob(blob, makeVideoFileName('녹화', ext, recordingChannelName));
 
             captureStream = null;
+            captureStats = null;
+            if (directFrameStatsStop) {
+                directFrameStatsStop();
+                directFrameStatsStop = null;
+            }
+            captureDimensions = null;
 
             if (activeCropStreamStop) {
                 activeCropStreamStop();
@@ -1629,9 +1886,20 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
         };
 
-        mediaRecorder.start();
+        // 250ms마다 청크를 받아야 녹화 중 실측 용량/비트레이트를 갱신할 수 있다.
+        mediaRecorder.start(250);
 
         isRecording = true;
+
+        showRecordingHud('REC', video, {
+            line1: (measuredFps) => (captureDimensions ? captureDimensions.width : Math.round(video.videoWidth || video.clientWidth || 0)) + 'x' + (captureDimensions ? captureDimensions.height : Math.round(video.videoHeight || video.clientHeight || 0)) + ' / 설정 ' + recFps + 'fps / 실제 ' + (measuredFps === null ? '-' : measuredFps.toFixed(1)) + 'fps',
+            getFps: (elapsedMs) => captureStats ? captureStats().drawnFrames / Math.max(0.001, elapsedMs / 1000) : null,
+            targetFps: recFps,
+            line2: () => {
+                const bytes = recordedChunks.reduce((sum, chunk) => sum + chunk.size, 0);
+                return formatHudBytes(bytes);
+            },
+        });
 
         updateButtonUI();
     }
@@ -1643,6 +1911,8 @@ if (typeof GM_registerMenuCommand === 'function') {
     function stopRecording() {
         if (mediaRecorder && mediaRecorder.state !== 'inactive') {
             mediaRecorder.stop();
+        } else {
+            removeRecordingHud();
         }
 
         isRecording = false;
@@ -1723,7 +1993,7 @@ if (typeof GM_registerMenuCommand === 'function') {
 
         gifMediaRecorder = new MediaRecorder(gifCaptureStream, {
             mimeType,
-            videoBitsPerSecond: getBitrateForVideo(video, true),
+            videoBitsPerSecond: getBitrateForVideo(video, true, gifSettings.fps || 15),
             audioBitsPerSecond: 192000,
         });
 
@@ -1733,7 +2003,14 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
         };
 
+        gifMediaRecorder.onerror = () => {
+            removeRecordingHud();
+            isGifRecording = false;
+            updateGifButtonUI();
+        };
+
         gifMediaRecorder.onstop = () => {
+            removeRecordingHud();
             gifRecordingBlob = new Blob(gifRecordedChunks, {
                 type: mimeType.split(';')[0],
             });
@@ -1748,9 +2025,14 @@ if (typeof GM_registerMenuCommand === 'function') {
             openGifEditorInNewTab(gifRecordingBlob, gifVideoTitle, gifSettings.autoGenerate);
         };
 
-        gifMediaRecorder.start();
+        // 250ms마다 청크를 받아야 GIF 녹화 중에도 실측 비트레이트를 표시할 수 있다.
+        gifMediaRecorder.start(250);
 
         isGifRecording = true;
+
+        showRecordingHud('GIF', video, {
+            line1: (gifSettings.fps || 15) + 'fps / ' + (gifSettings.width || 640) + 'px',
+        });
 
         updateGifButtonUI();
     }
@@ -1785,6 +2067,8 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
 
             gifMediaRecorder.stop();
+        } else {
+            removeRecordingHud();
         }
 
         isGifRecording = false;
