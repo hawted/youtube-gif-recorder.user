@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.11
-// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
+// @version      1.1.12
+// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처. 일반 녹화는 WebCodecs + mp4-muxer로 60fps 고정 프레임·1초 키프레임의 mp4를 직접 생성(미지원 환경은 MediaRecorder로 자동 폴백).
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
 // @match        https://chzzk.naver.com/*
+// @require      https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js
 // @grant        GM_openInTab
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -1083,7 +1084,9 @@ if (typeof GM_registerMenuCommand === 'function') {
                 hud.appendChild(line);
             };
             const measuredFps = details.getFps ? details.getFps(elapsedMs) : null;
-            const targetFps = details.targetFps || 60;
+            // targetFps는 숫자 또는 함수(예: 원본 영상의 실제 fps 추정값)를 받는다.
+            const targetFps =
+                typeof details.targetFps === 'function' ? details.targetFps() : details.targetFps || 60;
             const redThreshold = targetFps * 0.8;
             const yellowThreshold = targetFps * 0.92;
             const fpsColor = measuredFps !== null && measuredFps < redThreshold ? '#ff4d4d' : measuredFps !== null && measuredFps < yellowThreshold ? '#ffd24d' : kind === 'GIF' ? '#ffb347' : '#58e06f';
@@ -1331,6 +1334,7 @@ if (typeof GM_registerMenuCommand === 'function') {
     // ===========================================================
     // OCR 영역(크롭) 캡처 스트림 생성
     // fps가 지정되면 draw()가 해당 프레임 속도로만 그리도록 제한한다.
+    // (움짤 녹화와 MediaRecorder 폴백 경로에서 사용)
     // ===========================================================
 
     function createCroppedStream(video, ratioRegion, fps, maxHeight) {
@@ -1349,7 +1353,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         const outScale = maxHeight && video.videoHeight > maxHeight ? maxHeight / video.videoHeight : 1;
         canvas.width = Math.max(2, Math.round(initialRegion.width * outScale) & ~1);
         canvas.height = Math.max(2, Math.round(initialRegion.height * outScale) & ~1);
-         const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d');
         ctx.imageSmoothingQuality = 'high';
 
         let rafId = null;
@@ -1734,10 +1738,669 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
 
     // ===========================================================
+    // F9 녹화 (WebCodecs + mp4-muxer)
+    //
+    // MediaRecorder가 만드는 mp4는 프레임 시각이 가변(VFR)이고
+    // 키프레임 간격이 길며 fragmented 구조라서, 일부 업로드 사이트의
+    // 재인코딩 단계에서 움직임이 많은 구간이 깨진다. 여기서는
+    //  - 프레임 시각을 1/60초 격자에 맞추고(빈 칸은 직전 프레임 복제)
+    //  - 키프레임을 1초마다 강제하며
+    //  - 일반(faststart) mp4로 직접 muxing 한다.
+    // WebCodecs 등을 쓸 수 없으면 기존 MediaRecorder 방식으로 폴백한다.
+    // ===========================================================
+
+    let webRec = null;
+    let isRecordingStarting = false;
+
+    const WEBREC_KEYFRAME_SECONDS = 1;
+    const WEBREC_MAX_QUEUE = 16; // 인코더 대기열이 이보다 길면 새 프레임을 버린다.
+    const WEBREC_FILL_QUEUE = 4; // 대기열이 이 이하일 때만 빈 칸을 복제 프레임으로 채운다.
+    const WEBREC_AUDIO_FIRST_TIMEOUT_MS = 1500;
+
+    function getMp4MuxerLib() {
+        if (typeof Mp4Muxer !== 'undefined') return Mp4Muxer;
+        if (typeof window !== 'undefined' && window.Mp4Muxer) return window.Mp4Muxer;
+        return null;
+    }
+
+    function canUseWebCodecsRecording(video) {
+        return (
+            !!getMp4MuxerLib() &&
+            typeof VideoEncoder === 'function' &&
+            typeof VideoFrame === 'function' &&
+            typeof AudioEncoder === 'function' &&
+            typeof AudioData === 'function' &&
+            typeof MediaStreamTrackProcessor === 'function' &&
+            typeof video.requestVideoFrameCallback === 'function'
+        );
+    }
+
+    // 해상도·fps에 맞는 H.264(High) 레벨을 고르고, 브라우저가 지원하는 첫 설정을 반환한다.
+    async function pickAvcEncoderConfig(width, height, fps, bitrate) {
+        const mbW = Math.ceil(width / 16);
+        const mbH = Math.ceil(height / 16);
+        const frameMbs = mbW * mbH;
+        const mbPerSec = frameMbs * fps;
+
+        // [level_idc(hex), MaxMBPS, MaxFS]
+        const levels = [
+            ['1F', 108000, 3600],
+            ['28', 245760, 8192],
+            ['2A', 522240, 8704],
+            ['32', 589824, 22080],
+            ['33', 983040, 36864],
+            ['34', 2073600, 36864],
+        ];
+
+        for (const [hex, maxMbps, maxFs] of levels) {
+            if (mbPerSec > maxMbps || frameMbs > maxFs) continue;
+
+            const cfg = {
+                codec: 'avc1.6400' + hex,
+                width,
+                height,
+                bitrate,
+                framerate: fps,
+                latencyMode: 'quality',
+                avc: { format: 'avc' },
+            };
+
+            try {
+                const result = await VideoEncoder.isConfigSupported(cfg);
+                if (result && result.supported) return cfg;
+            } catch (e) {
+                // 다음 레벨 시도
+            }
+        }
+
+        return null;
+    }
+
+    // 오디오는 AAC를 우선, 안 되면 Opus(mp4 안에 저장)를 사용한다.
+    async function pickAudioEncoderConfig(sampleRate, numberOfChannels) {
+        const candidates = [
+            {
+                muxCodec: 'aac',
+                label: 'AAC',
+                cfg: { codec: 'mp4a.40.2', sampleRate, numberOfChannels, bitrate: 128000, aac: { format: 'aac' } },
+            },
+            {
+                muxCodec: 'opus',
+                label: 'Opus',
+                cfg: { codec: 'opus', sampleRate, numberOfChannels, bitrate: 128000 },
+            },
+        ];
+
+        for (const c of candidates) {
+            try {
+                const result = await AudioEncoder.isConfigSupported(c.cfg);
+                if (result && result.supported) return c;
+            } catch (e) {
+                // 다음 후보 시도
+            }
+        }
+
+        return null;
+    }
+
+    function disposeWebRec(rec) {
+        rec.stopping = true;
+
+        try {
+            if (rec.vfcId !== null && typeof rec.video.cancelVideoFrameCallback === 'function') {
+                rec.video.cancelVideoFrameCallback(rec.vfcId);
+            }
+        } catch (e) {}
+        rec.vfcId = null;
+
+        try {
+            if (rec.lastFrame) rec.lastFrame.close();
+        } catch (e) {}
+        rec.lastFrame = null;
+
+        try {
+            if (rec.videoEncoder && rec.videoEncoder.state !== 'closed') rec.videoEncoder.close();
+        } catch (e) {}
+
+        try {
+            if (rec.audioEncoder && rec.audioEncoder.state !== 'closed') rec.audioEncoder.close();
+        } catch (e) {}
+
+        try {
+            if (rec.audioReader) rec.audioReader.cancel();
+        } catch (e) {}
+
+        try {
+            if (rec.audioTrack) rec.audioTrack.stop();
+        } catch (e) {}
+    }
+
+    // 성공적으로 시작하면 true, 이 경로를 쓸 수 없어 폴백해야 하면 false.
+    async function startWebCodecsRecording(video) {
+        const lib = getMp4MuxerLib();
+        const fps = 60;
+        const stepUs = 1e6 / fps;
+        const maxH = gifSettings.recMaxHeight;
+
+        // 녹화 도중 영역이 해제되어도 시작 시점의 영역을 유지한다.
+        const ratio = cropRegion
+            ? {
+                  xRatio: cropRegion.xRatio,
+                  yRatio: cropRegion.yRatio,
+                  widthRatio: cropRegion.widthRatio,
+                  heightRatio: cropRegion.heightRatio,
+              }
+            : { xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1 };
+
+        const srcW = video.videoWidth;
+        const srcH = video.videoHeight;
+
+        if (!srcW || !srcH) return false;
+
+        const outScale = srcH > maxH ? maxH / srcH : 1;
+        const width = Math.max(2, Math.round(srcW * ratio.widthRatio * outScale) & ~1);
+        const height = Math.max(2, Math.round(srcH * ratio.heightRatio * outScale) & ~1);
+
+        // 크롭, 해상도 제한, 홀수 해상도일 때만 캔버스를 거친다.
+        const needCanvas = !!cropRegion || outScale < 1 || width !== srcW || height !== srcH;
+
+        const bitrate = getBitrateForVideo(video, false, fps);
+
+        const videoConfig = await pickAvcEncoderConfig(width, height, fps, bitrate);
+
+        if (!videoConfig) {
+            console.warn('[녹화] 이 해상도에 맞는 H.264 인코더 설정을 찾지 못했습니다.');
+            return false;
+        }
+
+        // ---------------------------------------------------
+        // 오디오: captureStream의 오디오 트랙을 읽는다.
+        // 첫 오디오 데이터를 받아야 샘플레이트/채널 수를 알 수 있다.
+        // ---------------------------------------------------
+
+        let capStream = null;
+
+        try {
+            capStream = video.captureStream();
+        } catch (e) {
+            console.warn('[녹화] captureStream 실패:', e);
+            return false;
+        }
+
+        // 영상은 video 요소에서 직접 가져오므로 비디오 트랙은 필요 없다.
+        capStream.getVideoTracks().forEach((t) => t.stop());
+
+        const audioTrack = capStream.getAudioTracks()[0] || null;
+
+        let audioReader = null;
+        let firstAudio = null;
+        let audioConfig = null;
+
+        if (audioTrack) {
+            try {
+                const processor = new MediaStreamTrackProcessor({ track: audioTrack });
+
+                audioReader = processor.readable.getReader();
+
+                const first = await Promise.race([
+                    audioReader.read(),
+                    new Promise((resolve) => setTimeout(() => resolve(null), WEBREC_AUDIO_FIRST_TIMEOUT_MS)),
+                ]);
+
+                if (first && !first.done && first.value) {
+                    firstAudio = first.value;
+
+                    audioConfig = await pickAudioEncoderConfig(
+                        firstAudio.sampleRate,
+                        firstAudio.numberOfChannels,
+                    );
+                }
+            } catch (e) {
+                console.warn('[녹화] 오디오 준비 실패:', e);
+            }
+
+            if (!firstAudio || !audioConfig) {
+                // 오디오를 담을 수 없으면 소리 없는 파일이 되므로 MediaRecorder로 폴백한다.
+                console.warn('[녹화] 오디오 데이터/인코더를 확보하지 못했습니다.');
+
+                try {
+                    if (firstAudio) firstAudio.close();
+                } catch (e) {}
+
+                try {
+                    if (audioReader) audioReader.cancel();
+                } catch (e) {}
+
+                try {
+                    audioTrack.stop();
+                } catch (e) {}
+
+                return false;
+            }
+        }
+
+        // ---------------------------------------------------
+        // 세션 객체
+        // ---------------------------------------------------
+
+        const rec = {
+            video,
+            width,
+            height,
+            fps,
+            stepUs,
+            ratio,
+            needCanvas,
+            canvas: null,
+            ctx: null,
+
+            stopping: false,
+            finishing: false,
+
+            lastFrame: null,
+            lastK: -1,
+            startMedia: video.currentTime,
+            lastMediaSeen: null,
+            srcDtEma: 0,
+            vfcId: null,
+
+            frameCount: 0,
+            uniqueFrames: 0,
+            dropped: 0,
+            bytes: 0,
+            vChunks: 0,
+
+            audioClockUs: 0,
+            audioTs0: null,
+            audioReader,
+            audioTrack,
+            audioLoop: null,
+
+            videoEncoder: null,
+            audioEncoder: null,
+            muxer: null,
+            target: null,
+            channelName: getChannelName(),
+        };
+
+        const onFatal = (e) => {
+            console.error('[녹화] 인코더/먹서 오류:', e);
+
+            if (!rec.finishing) {
+                // 지금까지 인코딩된 내용이라도 저장한다.
+                finishWebCodecsRecording(rec);
+            }
+        };
+
+        try {
+            rec.target = new lib.ArrayBufferTarget();
+
+            rec.muxer = new lib.Muxer({
+                target: rec.target,
+                video: { codec: 'avc', width, height, frameRate: fps },
+                audio: audioConfig
+                    ? {
+                          codec: audioConfig.muxCodec,
+                          numberOfChannels: audioConfig.cfg.numberOfChannels,
+                          sampleRate: audioConfig.cfg.sampleRate,
+                      }
+                    : undefined,
+                fastStart: 'in-memory',
+                firstTimestampBehavior: 'offset',
+            });
+
+            rec.videoEncoder = new VideoEncoder({
+                output: (chunk, meta) => {
+                    rec.bytes += chunk.byteLength;
+                    rec.vChunks += 1;
+
+                    try {
+                        rec.muxer.addVideoChunk(chunk, meta);
+                    } catch (e) {
+                        onFatal(e);
+                    }
+                },
+                error: onFatal,
+            });
+
+            rec.videoEncoder.configure(videoConfig);
+
+            if (audioConfig) {
+                rec.audioEncoder = new AudioEncoder({
+                    output: (chunk, meta) => {
+                        rec.bytes += chunk.byteLength;
+
+                        // 일시정지 등으로 캡처 시계에 틈이 생겨도 오디오가 끊김 없이 이어지도록
+                        // 청크 길이를 누적해서 타임스탬프를 직접 매긴다.
+                        let ts;
+
+                        if (chunk.duration) {
+                            ts = Math.round(rec.audioClockUs);
+                            rec.audioClockUs += chunk.duration;
+                        } else {
+                            if (rec.audioTs0 === null) rec.audioTs0 = chunk.timestamp;
+                            ts = chunk.timestamp - rec.audioTs0;
+                        }
+
+                        try {
+                            rec.muxer.addAudioChunk(chunk, meta, ts);
+                        } catch (e) {
+                            onFatal(e);
+                        }
+                    },
+                    error: onFatal,
+                });
+
+                rec.audioEncoder.configure(audioConfig.cfg);
+
+                rec.audioLoop = (async () => {
+                    let data = firstAudio;
+
+                    try {
+                        while (data) {
+                            try {
+                                if (!rec.stopping && rec.audioEncoder.state === 'configured') {
+                                    rec.audioEncoder.encode(data);
+                                }
+                            } finally {
+                                data.close();
+                            }
+
+                            const next = await rec.audioReader.read();
+
+                            data = next.done ? null : next.value;
+                        }
+                    } catch (e) {
+                        console.warn('[녹화] 오디오 읽기 종료:', e);
+                    }
+                })();
+
+                firstAudio = null;
+            }
+        } catch (e) {
+            console.warn('[녹화] WebCodecs 초기화 실패:', e);
+
+            try {
+                if (firstAudio) firstAudio.close();
+            } catch (err) {}
+
+            disposeWebRec(rec);
+
+            return false;
+        }
+
+        // ---------------------------------------------------
+        // 프레임 생성
+        // ---------------------------------------------------
+
+        const frameDuration = Math.round(stepUs);
+
+        const makeFrame = (timestamp) => {
+            const init = { timestamp, duration: frameDuration };
+
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+
+            // 전체 화면, 해상도 변화 없음: 캔버스 복사 없이 video에서 바로 만든다.
+            if (!rec.needCanvas && vw === rec.width && vh === rec.height) {
+                return new VideoFrame(video, init);
+            }
+
+            if (!rec.canvas) {
+                rec.canvas = document.createElement('canvas');
+                rec.canvas.width = rec.width;
+                rec.canvas.height = rec.height;
+                rec.ctx = rec.canvas.getContext('2d', { alpha: false });
+                rec.ctx.imageSmoothingQuality = 'high';
+            }
+
+            // 재생 중 화질이 바뀌어도 비율 기준으로 같은 영역을 같은 출력 크기로 그린다.
+            const sx = rec.ratio.xRatio * vw;
+            const sy = rec.ratio.yRatio * vh;
+            const sw = Math.max(1, rec.ratio.widthRatio * vw);
+            const sh = Math.max(1, rec.ratio.heightRatio * vh);
+
+            rec.ctx.drawImage(video, sx, sy, sw, sh, 0, 0, rec.width, rec.height);
+
+            return new VideoFrame(rec.canvas, init);
+        };
+
+        const encodeFrame = (frame) => {
+            const keyFrame = rec.frameCount % (fps * WEBREC_KEYFRAME_SECONDS) === 0;
+
+            rec.frameCount += 1;
+
+            rec.videoEncoder.encode(frame, { keyFrame });
+        };
+
+        const handleFrame = (mediaTime) => {
+            if (rec.stopping) return;
+
+            // 원본 영상의 실제 fps 추정 (HUD 색상 판단용)
+            if (rec.lastMediaSeen !== null) {
+                const dt = mediaTime - rec.lastMediaSeen;
+
+                if (dt > 0 && dt < 0.5) {
+                    rec.srcDtEma = rec.srcDtEma ? rec.srcDtEma * 0.9 + dt * 0.1 : dt;
+                }
+            }
+
+            rec.lastMediaSeen = mediaTime;
+
+            let t = mediaTime - rec.startMedia;
+
+            // 탐색(seek)이나 긴 정지로 영상 시간이 크게 튀면 타임라인을 이어 붙인다.
+            if (rec.lastK >= 0) {
+                const nextT = (rec.lastK + 1) / fps;
+
+                if (t < rec.lastK / fps - 0.25 || t > nextT + 1) {
+                    rec.startMedia = mediaTime - nextT;
+                    t = nextT;
+                }
+            }
+
+            const k = Math.max(0, Math.round(t * fps));
+
+            // 같은 칸에 이미 프레임이 있으면(원본이 격자보다 촘촘하거나 지터) 건너뛴다.
+            if (k <= rec.lastK) return;
+
+            const enc = rec.videoEncoder;
+
+            if (enc.state !== 'configured') return;
+
+            if (enc.encodeQueueSize > WEBREC_MAX_QUEUE) {
+                rec.dropped += 1;
+                return;
+            }
+
+            let frame;
+
+            try {
+                frame = makeFrame(Math.round(k * stepUs));
+            } catch (e) {
+                return; // 아직 그릴 수 있는 프레임이 없음
+            }
+
+            // 비어 있는 칸은 직전 프레임을 다시 인코딩해서 채운다(고정 프레임레이트 유지).
+            if (rec.lastFrame && k - rec.lastK > 1 && enc.encodeQueueSize <= WEBREC_FILL_QUEUE) {
+                for (let kk = rec.lastK + 1; kk < k; kk++) {
+                    const dup = new VideoFrame(rec.lastFrame, {
+                        timestamp: Math.round(kk * stepUs),
+                        duration: frameDuration,
+                    });
+
+                    try {
+                        encodeFrame(dup);
+                    } finally {
+                        dup.close();
+                    }
+                }
+            }
+
+            try {
+                encodeFrame(frame);
+            } catch (e) {
+                frame.close();
+                throw e;
+            }
+
+            if (rec.lastFrame) rec.lastFrame.close();
+
+            rec.lastFrame = frame;
+            rec.lastK = k;
+            rec.uniqueFrames += 1;
+        };
+
+        const onVideoFrame = (now, metadata) => {
+            if (rec.stopping) return;
+
+            try {
+                handleFrame(typeof metadata.mediaTime === 'number' ? metadata.mediaTime : video.currentTime);
+            } catch (e) {
+                console.warn('[녹화] 프레임 처리 오류:', e);
+            }
+
+            rec.vfcId = video.requestVideoFrameCallback(onVideoFrame);
+        };
+
+        // ---------------------------------------------------
+        // 시작
+        // ---------------------------------------------------
+
+        webRec = rec;
+
+        isRecording = true;
+
+        try {
+            handleFrame(video.currentTime);
+        } catch (e) {
+            console.warn('[녹화] 첫 프레임 처리 오류:', e);
+        }
+
+        rec.vfcId = video.requestVideoFrameCallback(onVideoFrame);
+
+        console.log(
+            '[녹화] WebCodecs mp4 | video:',
+            videoConfig.codec,
+            width + 'x' + height,
+            fps + 'fps CFR',
+            Math.round(bitrate / 1000) + 'kbps',
+            '| audio:',
+            audioConfig ? audioConfig.label + ' ' + audioConfig.cfg.sampleRate + 'Hz/' + audioConfig.cfg.numberOfChannels + 'ch' : '없음',
+        );
+
+        showRecordingHud('REC (WebCodecs)', video, {
+            line1: (measuredFps) =>
+                width + 'x' + height + ' / 설정 ' + fps + 'fps / 실제 ' + (measuredFps === null ? '-' : measuredFps.toFixed(1)) + 'fps',
+            getFps: (elapsedMs) => rec.uniqueFrames / Math.max(0.001, elapsedMs / 1000),
+            targetFps: () => (rec.srcDtEma ? Math.min(fps, 1 / rec.srcDtEma) : fps),
+            line2: () => formatHudBytes(rec.bytes) + (rec.dropped ? ' / 드롭 ' + rec.dropped : ''),
+        });
+
+        updateButtonUI();
+
+        return true;
+    }
+
+    async function finishWebCodecsRecording(rec) {
+        if (!rec || rec.finishing) return;
+
+        rec.finishing = true;
+        rec.stopping = true;
+
+        if (webRec === rec) webRec = null;
+
+        isRecording = false;
+
+        removeRecordingHud();
+
+        updateButtonUI();
+
+        try {
+            if (rec.vfcId !== null && typeof rec.video.cancelVideoFrameCallback === 'function') {
+                rec.video.cancelVideoFrameCallback(rec.vfcId);
+            }
+        } catch (e) {}
+
+        rec.vfcId = null;
+
+        // 오디오 읽기를 멈추고, 읽기 루프가 끝난 뒤에 인코더를 flush 한다.
+        try {
+            if (rec.audioReader) await rec.audioReader.cancel();
+        } catch (e) {}
+
+        try {
+            if (rec.audioLoop) await rec.audioLoop;
+        } catch (e) {}
+
+        try {
+            if (rec.audioTrack) rec.audioTrack.stop();
+        } catch (e) {}
+
+        try {
+            if (rec.lastFrame) rec.lastFrame.close();
+        } catch (e) {}
+
+        rec.lastFrame = null;
+
+        try {
+            if (rec.videoEncoder && rec.videoEncoder.state === 'configured') await rec.videoEncoder.flush();
+        } catch (e) {
+            console.warn('[녹화] 비디오 flush 실패:', e);
+        }
+
+        try {
+            if (rec.audioEncoder && rec.audioEncoder.state === 'configured') await rec.audioEncoder.flush();
+        } catch (e) {
+            console.warn('[녹화] 오디오 flush 실패:', e);
+        }
+
+        try {
+            if (rec.videoEncoder && rec.videoEncoder.state !== 'closed') rec.videoEncoder.close();
+        } catch (e) {}
+
+        try {
+            if (rec.audioEncoder && rec.audioEncoder.state !== 'closed') rec.audioEncoder.close();
+        } catch (e) {}
+
+        let blob = null;
+
+        try {
+            if (rec.vChunks === 0) {
+                throw new Error('인코딩된 영상 프레임이 없습니다.');
+            }
+
+            rec.muxer.finalize();
+
+            blob = new Blob([rec.target.buffer], { type: 'video/mp4' });
+        } catch (e) {
+            console.error('[녹화] mp4 생성 실패:', e);
+
+            alert('녹화 저장에 실패했습니다: ' + (e && e.message ? e.message : e));
+
+            return;
+        }
+
+        downloadBlob(blob, makeVideoFileName('녹화', 'mp4', rec.channelName));
+    }
+
+    // ===========================================================
     // F9 녹화 시작
     // ===========================================================
 
     async function startRecording() {
+        if (isRecordingStarting || isRecording) return;
+
+        isRecordingStarting = true;
+
+        try {
+            await startRecordingImpl();
+        } finally {
+            isRecordingStarting = false;
+        }
+    }
+
+    async function startRecordingImpl() {
         const video = findVideoElement();
 
         if (!video) {
@@ -1752,6 +2415,24 @@ if (typeof GM_registerMenuCommand === 'function') {
             return;
         }
 
+        // 1순위: WebCodecs + mp4-muxer (고정 프레임레이트 / 1초 키프레임)
+        if (canUseWebCodecsRecording(video)) {
+            let started = false;
+
+            try {
+                started = await startWebCodecsRecording(video);
+            } catch (err) {
+                console.warn('[녹화] WebCodecs 시작 실패:', err);
+            }
+
+            if (started) return;
+
+            console.warn('[녹화] WebCodecs 경로를 쓸 수 없어 MediaRecorder(mp4)로 폴백합니다.');
+        } else {
+            console.warn('[녹화] WebCodecs/mp4-muxer를 쓸 수 없어 MediaRecorder(mp4)로 녹화합니다.');
+        }
+
+        // 2순위(폴백): MediaRecorder
         const recFps = 60;
 
         const maxH = gifSettings.recMaxHeight;
@@ -1819,6 +2500,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             mimeType,
             videoBitsPerSecond: getBitrateForVideo(video, false, recFps),
             audioBitsPerSecond: 128000,
+            videoKeyFrameIntervalDuration: 1000,
         });
 
         console.log(
@@ -1894,6 +2576,12 @@ if (typeof GM_registerMenuCommand === 'function') {
     // ===========================================================
 
     function stopRecording() {
+        if (webRec) {
+            finishWebCodecsRecording(webRec);
+
+            return;
+        }
+
         if (mediaRecorder && mediaRecorder.state !== 'inactive') {
             mediaRecorder.stop();
         } else {
@@ -1906,6 +2594,10 @@ if (typeof GM_registerMenuCommand === 'function') {
     }
 
     function toggleRecording() {
+        if (isRecordingStarting) {
+            return;
+        }
+
         if (isRecording) {
             stopRecording();
         } else {
