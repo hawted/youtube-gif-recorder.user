@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.10
-// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처. 녹화 형식(mp4/webm), 녹화 FPS(30/60) 선택 지원.
+// @version      1.1.11
+// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처.
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
 // @match        https://chzzk.naver.com/*
@@ -29,7 +29,7 @@ const DEFAULT_SETTINGS = {
     gifQuality: 'normal', // 'normal' | 'high'(gifski)
     autoGenerate: false,
     bitrateMbps: 4,
-    recFps: 30, // 30 | 60 (일반 녹화 프레임 속도)
+    recFps: 60, // 일반 녹화 프레임 속도 (60 고정)
     recMaxHeight: 2160, // 1080 | 1440 | 2160
     keyRecord: 'F9',
     keyScreenshot: 'F10',
@@ -78,7 +78,7 @@ function loadSettings() {
                         : Number(p.bitrateMbps)
                     : DEFAULT_SETTINGS.bitrateMbps,
 
-            recFps: Number(p.recFps) === 60 ? 60 : 30,
+            recFps: 60,
             recMaxHeight: [720, 1080, 1440, 2160].includes(Number(p.recMaxHeight)) ? Number(p.recMaxHeight) : DEFAULT_SETTINGS.recMaxHeight,
 
             keyRecord:
@@ -195,13 +195,6 @@ function buildBitrateOptionsHtml(selected) {
     html += `<option value="custom"${selected !== 'auto' && !BITRATE_PRESETS.includes(selected) ? ' selected' : ''}>직접 입력</option>`;
 
     return html;
-}
-
-function buildRecFpsOptionsHtml(selected) {
-    return (
-        `<option value="30"${selected !== 60 ? ' selected' : ''}>30 fps</option>` +
-        `<option value="60"${selected === 60 ? ' selected' : ''}>60 fps</option>`
-    );
 }
 
 function buildWebpCompressionOptionsHtml(lossless) {
@@ -407,17 +400,6 @@ function openSettingsPanel() {
             </label>
 
             <label style="font-size:13px;display:block;margin-bottom:10px;">
-                녹화 프레임 속도
-
-                <select
-                    id="yt-gif-setting-rec-fps"
-                    style="display:block;margin-top:4px;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;"
-                >
-                    ${buildRecFpsOptionsHtml(gifSettings.recFps)}
-                </select>
-            </label>
-
-            <label style="font-size:13px;display:block;margin-bottom:10px;">
                 최대 녹화 화질 <span style="color:#888;font-weight:normal;">(시청 화질이 더 높으면 이 값으로 축소)</span>
                 <select id="yt-gif-setting-rec-maxh" style="display:block;margin-top:4px;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;">
                     ${[720, 1080, 1440, 2160].map((v) => `<option value="${v}"${v === gifSettings.recMaxHeight ? ' selected' : ''}>${v}p</option>`).join('')}
@@ -545,8 +527,6 @@ function openSettingsPanel() {
 
     const bitrateCustomInput = panel.querySelector('#yt-gif-setting-bitrate-custom');
 
-    const recFpsSelect = panel.querySelector('#yt-gif-setting-rec-fps');
-
     function updateBitrateCustomUI() {
         bitrateCustomInput.style.display = bitrateSelect.value === 'custom' ? 'block' : 'none';
     }
@@ -668,7 +648,6 @@ function openSettingsPanel() {
         panel.querySelector('#yt-gif-setting-auto').checked = settings.autoGenerate;
         bitrateSelect.value = settings.bitrateMbps === 'auto' ? 'auto' : String(settings.bitrateMbps);
         bitrateCustomInput.value = typeof settings.bitrateMbps === 'number' ? settings.bitrateMbps : 4;
-        recFpsSelect.value = String(settings.recFps);
         panel.querySelector('#yt-gif-setting-rec-maxh').value = settings.recMaxHeight;
         keyRecordInput.value = settings.keyRecord;
         keyScreenshotInput.value = settings.keyScreenshot;
@@ -720,7 +699,7 @@ function openSettingsPanel() {
         const gifQuality =
             panel.querySelector('#yt-gif-setting-gifquality').value === 'high' ? 'high' : 'normal';
 
-        const recFps = parseInt(recFpsSelect.value, 10) === 60 ? 60 : 30;
+        const recFps = 60;
         const recMaxHeight = parseInt(panel.querySelector('#yt-gif-setting-rec-maxh').value, 10) || 2160;
 
         const keyRecord = keyRecordInput.value;
@@ -1194,6 +1173,7 @@ if (typeof GM_registerMenuCommand === 'function') {
 
     function pickMimeType(preferred) {
         const mp4Candidates = [
+            'video/mp4;codecs=avc1.640033,mp4a.40.2',
             'video/mp4;codecs=avc1.640028,mp4a.40.2',
             'video/mp4;codecs=avc1.4d0028,mp4a.40.2',
             'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
@@ -1375,6 +1355,7 @@ if (typeof GM_registerMenuCommand === 'function') {
         let rafId = null;
         let videoFrameCallbackId = null;
         let stopped = false;
+        let canvasTrack = null;
         let drawnFrames = 0;
 
         let lastMediaTime = -Infinity;
@@ -1386,7 +1367,7 @@ if (typeof GM_registerMenuCommand === 'function') {
 
             // 실제 영상 시간 기준으로 처리한다. 화면 주사율에 의존하지 않으므로
             // 60Hz/120Hz 모니터에서 프레임이 불필요하게 중복되거나 건너뛰지 않는다.
-            if (mediaFrameInterval && mediaTime - lastMediaTime < mediaFrameInterval * 0.98) {
+            if (mediaFrameInterval && mediaTime - lastMediaTime < mediaFrameInterval * 0.9) {
                 return;
             }
 
@@ -1407,6 +1388,8 @@ if (typeof GM_registerMenuCommand === 'function') {
                 const sh = Math.max(1, ratioRegion.heightRatio * vh);
 
                 ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+                if (canvasTrack) canvasTrack.requestFrame();
             } catch (e) {
                 // 프레임 드로잉 실패는 무시하고 다음 프레임 시도
             }
@@ -1420,6 +1403,10 @@ if (typeof GM_registerMenuCommand === 'function') {
             }
         }
 
+        // 프레임을 그릴 때마다 requestFrame()으로 직접 밀어넣기 위해 captureStream(0) 사용
+        const canvasStream = canvas.captureStream(0);
+        canvasTrack = canvasStream.getVideoTracks()[0];
+
         if (typeof video.requestVideoFrameCallback === 'function') {
             drawFrame(video.currentTime || 0);
             videoFrameCallbackId = video.requestVideoFrameCallback(onVideoFrame);
@@ -1431,8 +1418,6 @@ if (typeof GM_registerMenuCommand === 'function') {
             };
             rafId = requestAnimationFrame(drawWithRaf);
         }
-
-        const canvasStream = fps ? canvas.captureStream(fps) : canvas.captureStream();
 
         let audioTracks = [];
 
@@ -1767,13 +1752,13 @@ if (typeof GM_registerMenuCommand === 'function') {
             return;
         }
 
-        const recFps = gifSettings.recFps === 60 ? 60 : 30;
+        const recFps = 60;
 
         const maxH = gifSettings.recMaxHeight;
-        // 60fps 전체 화면 녹화는 캔버스를 거치지 않고 원본 video 스트림을
+        // 전체 화면 녹화는 캔버스를 거치지 않고 원본 video 스트림을
         // 직접 사용한다. 캔버스 복사/재인코딩을 줄여 프레임 드랍을 완화한다.
-        // 크롭, 해상도 제한, 30fps 변환이 필요한 경우에만 캔버스를 사용한다.
-        if (cropRegion || recFps === 30 || video.videoHeight > maxH) {
+        // 크롭, 해상도 제한이 필요한 경우에만 캔버스를 사용한다.
+        if (cropRegion || video.videoHeight > maxH) {
             const cropped = createCroppedStream(video, cropRegion || { xRatio: 0, yRatio: 0, widthRatio: 1, heightRatio: 1 }, recFps, maxH);
 
             captureStream = cropped.stream;
