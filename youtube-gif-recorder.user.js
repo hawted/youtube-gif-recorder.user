@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         방송 플랫폼 녹화 · 스크린샷 · 움짤 생성
 // @namespace    http://tampermonkey.net/
-// @version      1.1.12
-// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처. 일반 녹화는 WebCodecs + mp4-muxer로 60fps 고정 프레임·1초 키프레임의 mp4를 직접 생성(미지원 환경은 MediaRecorder로 자동 폴백).
+// @version      1.1.13
+// @description  유튜브·트위치·치지직 플레이어 컨트롤바에 녹화/스크린샷/움짤/OCR영역지정 버튼 추가. 유튜브 쇼츠는 플로팅 버튼으로 지원(컨트롤바 넘침 방지). 단축키 커스터마이징 가능 (기본값: 녹화 F9, 스크린샷 F10, 움짤 F8). 움짤 자동 생성 옵션 지원. GIF 고화질(gifski) 옵션 지원. OCR 영역 지정 시 드래그로 선택한 영역만 녹화/움짤/스크린샷으로 캡처. 일반 녹화는 WebCodecs + mp4-muxer로 60fps 고정 프레임·1초 키프레임의 mp4를 직접 생성(미지원 환경은 MediaRecorder로 자동 폴백). 녹화 종료 시 편집 여부를 묻는 옵션 지원(예 선택 시 시작/끝 구간 편집창).
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
 // @match        https://chzzk.naver.com/*
@@ -29,6 +29,7 @@ const DEFAULT_SETTINGS = {
     webpLossless: false,
     gifQuality: 'normal', // 'normal' | 'high'(gifski)
     autoGenerate: false,
+    askEditAfterRecord: false, // 녹화 종료 시 편집할지 묻기
     bitrateMbps: 4,
     recFps: 60, // 일반 녹화 프레임 속도 (60 고정)
     recMaxHeight: 2160, // 1080 | 1440 | 2160
@@ -71,6 +72,8 @@ function loadSettings() {
             gifQuality: p.gifQuality === 'high' ? 'high' : 'normal',
 
             autoGenerate: p.autoGenerate === true,
+
+            askEditAfterRecord: p.askEditAfterRecord === true,
 
             bitrateMbps:
                 p.bitrateMbps === 'auto' || Number(p.bitrateMbps) > 0
@@ -274,6 +277,10 @@ function openSettingsPanel() {
             </div>
         </div>
 
+        <details style="margin-bottom:10px;">
+        <summary style="cursor:pointer;font-size:14px;font-weight:bold;padding:10px 12px;background:#222;border:1px solid #333;border-radius:8px;">움짤 설정</summary>
+        <div style="padding:12px 4px 0;">
+
         <label style="font-size:13px;display:block;margin-bottom:10px;">
             기본 FPS
 
@@ -382,23 +389,22 @@ function openSettingsPanel() {
             자동 생성 (편집창 없이 저장된 설정으로 바로 저장)
         </label>
 
-        <div style="border-top:1px solid #333;margin:4px 0 16px;padding-top:14px;">
+        </div>
+        </details>
 
-            <div style="font-size:13px;font-weight:bold;margin-bottom:10px;color:#aaa;">
-                단축키 설정 (입력칸 클릭 후 원하는 키를 누르세요. Ctrl+F7처럼 조합키도 가능합니다)
-            </div>
+        <details style="margin-bottom:10px;">
+        <summary style="cursor:pointer;font-size:14px;font-weight:bold;padding:10px 12px;background:#222;border:1px solid #333;border-radius:8px;">녹화 설정</summary>
+        <div style="padding:12px 4px 0;">
 
-            <label style="font-size:13px;display:block;margin-bottom:10px;">
-                녹화 단축키
-
-                <input
-                    id="yt-gif-setting-key-record"
-                    type="text"
-                    readonly
-                    value="${gifSettings.keyRecord}"
-                    style="display:block;margin-top:4px;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;cursor:pointer;text-align:center;"
-                />
-            </label>
+        <label style="font-size:13px;display:flex;align-items:center;gap:8px;margin-bottom:16px;cursor:pointer;">
+            <input
+                id="yt-gif-setting-ask-edit"
+                type="checkbox"
+                ${gifSettings.askEditAfterRecord ? 'checked' : ''}
+                style="width:16px;height:16px;"
+            />
+            녹화 종료 시 편집할지 묻기 (예 → 시작/끝 구간 편집창)
+        </label>
 
             <label style="font-size:13px;display:block;margin-bottom:10px;">
                 최대 녹화 화질 <span style="color:#888;font-weight:normal;">(시청 화질이 더 높으면 이 값으로 축소)</span>
@@ -427,6 +433,29 @@ function openSettingsPanel() {
                 value="${typeof gifSettings.bitrateMbps === 'number' ? gifSettings.bitrateMbps : 4}"
                 style="display:${gifSettings.bitrateMbps !== 'auto' && !BITRATE_PRESETS.includes(gifSettings.bitrateMbps) ? 'block' : 'none'};margin-top:4px;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;margin-bottom:16px;"
             />
+
+        </div>
+        </details>
+
+        <details style="margin-bottom:10px;">
+        <summary style="cursor:pointer;font-size:14px;font-weight:bold;padding:10px 12px;background:#222;border:1px solid #333;border-radius:8px;">단축키 설정</summary>
+        <div style="padding:12px 4px 0;">
+
+            <div style="font-size:13px;font-weight:bold;margin-bottom:10px;color:#aaa;">
+                입력칸 클릭 후 원하는 키를 누르세요. Ctrl+F7처럼 조합키도 가능합니다
+            </div>
+
+            <label style="font-size:13px;display:block;margin-bottom:10px;">
+                녹화 단축키
+
+                <input
+                    id="yt-gif-setting-key-record"
+                    type="text"
+                    readonly
+                    value="${gifSettings.keyRecord}"
+                    style="display:block;margin-top:4px;width:100%;box-sizing:border-box;background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;cursor:pointer;text-align:center;"
+                />
+            </label>
 
             <label style="font-size:13px;display:block;margin-bottom:10px;">
                 스크린샷 단축키
@@ -465,6 +494,8 @@ function openSettingsPanel() {
             </label>
 
         </div>
+
+        </details>
 
         <div style="display:flex;justify-content:flex-end;gap:10px;">
 
@@ -647,6 +678,7 @@ function openSettingsPanel() {
         webpSelect.value = settings.webpLossless ? 'lossless' : 'lossy';
         gifQualitySelect.value = settings.gifQuality;
         panel.querySelector('#yt-gif-setting-auto').checked = settings.autoGenerate;
+        panel.querySelector('#yt-gif-setting-ask-edit').checked = settings.askEditAfterRecord === true;
         bitrateSelect.value = settings.bitrateMbps === 'auto' ? 'auto' : String(settings.bitrateMbps);
         bitrateCustomInput.value = typeof settings.bitrateMbps === 'number' ? settings.bitrateMbps : 4;
         panel.querySelector('#yt-gif-setting-rec-maxh').value = settings.recMaxHeight;
@@ -713,6 +745,8 @@ function openSettingsPanel() {
 
         const autoGenerate = panel.querySelector('#yt-gif-setting-auto').checked;
 
+        const askEditAfterRecord = panel.querySelector('#yt-gif-setting-ask-edit').checked;
+
         const bitrateMbps =
             bitrateSelect.value === 'auto'
                 ? 'auto'
@@ -775,6 +809,7 @@ function openSettingsPanel() {
             webpLossless,
             gifQuality,
             autoGenerate,
+            askEditAfterRecord,
             bitrateMbps,
             recFps,
             recMaxHeight,
@@ -2381,7 +2416,7 @@ if (typeof GM_registerMenuCommand === 'function') {
             return;
         }
 
-        downloadBlob(blob, makeVideoFileName('녹화', 'mp4', rec.channelName));
+        deliverRecording(blob, 'mp4', rec.channelName);
     }
 
     // ===========================================================
@@ -2536,7 +2571,7 @@ if (typeof GM_registerMenuCommand === 'function') {
                 type: mimeType.split(';')[0],
             });
 
-            downloadBlob(blob, makeVideoFileName('녹화', ext, recordingChannelName));
+            deliverRecording(blob, ext, recordingChannelName);
 
             captureStream = null;
             captureStats = null;
@@ -3398,6 +3433,204 @@ if (typeof GM_registerMenuCommand === 'function') {
         };
 
         reader.readAsDataURL(blob);
+    }
+
+    // ===========================================================
+    // 일반 녹화 종료 후 편집 여부 확인 / 편집창
+    // 풀스크린에서도 보이도록 커스텀 모달 대신 confirm()을 쓴다.
+    // ===========================================================
+
+    const recEditChannel = new BroadcastChannel('yt-rec-edit-done');
+
+    // 편집창이 닫히면 blob URL을 해제한다.
+    recEditChannel.onmessage = (e) => {
+        if (typeof e.data === 'string' && e.data.startsWith('blob:')) {
+            URL.revokeObjectURL(e.data);
+        }
+    };
+
+    function deliverRecording(blob, ext, channelName) {
+        if (
+            gifSettings.askEditAfterRecord &&
+            confirm('녹화가 끝났습니다.\n\n시작/끝 구간을 편집하시겠습니까?\n(확인: 편집창 열기 / 취소: 바로 저장)')
+        ) {
+            openRecordingEditorInNewTab(blob, ext, channelName);
+            return;
+        }
+
+        downloadBlob(blob, makeVideoFileName('녹화', ext, channelName));
+    }
+
+    function openRecordingEditorInNewTab(blob, ext, channelName) {
+        // 긴 녹화를 dataURL로 HTML에 넣으면 메모리를 많이 쓰므로 blob URL을 넘긴다.
+        const srcUrl = URL.createObjectURL(blob);
+
+        const html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>녹화 편집</title>
+<style>
+html,body{margin:0;padding:0;}
+body{background:#181818;color:#fff;font-family:Arial,sans-serif;padding:20px;box-sizing:border-box;}
+video{width:100%;max-width:960px;background:#000;border-radius:6px;display:block;}
+.mini{background:#2c2c2c;color:#fff;border:1px solid #444;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;margin:4px;}
+.mainbtn{border:none;border-radius:6px;padding:8px 18px;font-size:14px;color:#fff;cursor:pointer;font-weight:bold;margin:4px;}
+.mainbtn:disabled{opacity:.5;cursor:not-allowed;}
+input{background:#111;color:#fff;border:1px solid #444;border-radius:4px;padding:4px 6px;width:80px;}
+#bar{background:#333;border-radius:6px;overflow:hidden;height:10px;margin-top:6px;max-width:960px;}
+#fill{background:#3ea6ff;height:100%;width:0%;}
+</style></head><body>
+<h2>녹화 편집</h2>
+<video id="v" controls></video>
+<div style="margin-top:14px;">
+구간 선택(초) 시작 <input id="s" type="number" step="0.1" min="0" value="0">
+<button class="mini" id="setS">현재 위치</button>
+끝 <input id="e" type="number" step="0.1" min="0">
+<button class="mini" id="setE">현재 위치</button>
+<button class="mini" id="resetR">전체 구간</button>
+<button class="mini" id="preview">구간 미리보기</button>
+</div>
+<div style="margin-top:10px;font-size:12px;color:#aaa;">
+구간을 바꾸면 해당 구간을 재생하며 다시 인코딩하므로 구간 길이만큼 시간이 걸립니다. 구간을 바꾸지 않으면 원본 그대로 저장됩니다.
+</div>
+<div id="pw" style="display:none;max-width:960px;margin-top:10px;">
+<div id="lbl">저장 중...</div>
+<div id="bar"><div id="fill"></div></div>
+</div>
+<button class="mainbtn" id="cancel" style="background:#3d3d3d;">닫기</button>
+<button class="mainbtn" id="save" style="background:#3ea6ff;">저장</button>
+<script>
+const v=document.getElementById("v");
+const sEl=document.getElementById("s"),eEl=document.getElementById("e");
+const saveBtn=document.getElementById("save");
+const pw=document.getElementById("pw"),lbl=document.getElementById("lbl"),fill=document.getElementById("fill");
+const srcUrl=${JSON.stringify(srcUrl)};
+const ext=${JSON.stringify(ext)};
+const channelName=${JSON.stringify(channelName || 'Recording')};
+const origBytes=${blob.size};
+let dur=0,ac=null,adest=null;
+v.src=srcUrl;
+
+function pad(n,l){return String(n).padStart(l||2,"0");}
+function makeName(x){const d=new Date();return channelName+"_"+pad(d.getHours())+"-"+pad(d.getMinutes())+"-"+pad(d.getSeconds())+"-"+pad(d.getMilliseconds(),3)+"."+x;}
+function download(b,name){const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),10000);}
+
+v.addEventListener("loadedmetadata",()=>{
+  const fix=()=>{
+    if(isFinite(v.duration)&&v.duration>0){
+      dur=v.duration;
+      eEl.value=(Math.floor(dur*100)/100).toString();
+      v.currentTime=0;
+    }else{
+      v.currentTime=1e101;
+      v.addEventListener("durationchange",fix,{once:true});
+    }
+  };
+  fix();
+});
+
+document.getElementById("setS").onclick=()=>{sEl.value=v.currentTime.toFixed(2);};
+document.getElementById("setE").onclick=()=>{eEl.value=v.currentTime.toFixed(2);};
+document.getElementById("resetR").onclick=()=>{sEl.value=0;eEl.value=(Math.floor(dur*100)/100).toString();};
+document.getElementById("cancel").onclick=()=>window.close();
+window.addEventListener("beforeunload",()=>{try{new BroadcastChannel("yt-rec-edit-done").postMessage(srcUrl);}catch(e){}});
+
+document.getElementById("preview").onclick=async()=>{
+  const start=parseFloat(sEl.value),end=parseFloat(eEl.value);
+  if(isNaN(start)||isNaN(end)||end<=start)return;
+  await seekTo(start);
+  v.play();
+  const t=setInterval(()=>{if(v.currentTime>=end||v.paused){v.pause();clearInterval(t);}},30);
+};
+
+function seekTo(t){
+  return new Promise((resolve)=>{
+    const done=()=>{v.removeEventListener("seeked",done);clearTimeout(timer);resolve();};
+    const timer=setTimeout(done,1500);
+    v.addEventListener("seeked",done);
+    v.currentTime=t;
+  });
+}
+
+function pickMime(){
+  const c=["video/mp4;codecs=avc1.640033,mp4a.40.2","video/mp4;codecs=avc1.640028,mp4a.40.2","video/mp4;codecs=avc1,mp4a.40.2","video/webm;codecs=vp9,opus","video/webm"];
+  for(const m of c){if(window.MediaRecorder&&MediaRecorder.isTypeSupported(m))return m;}
+  return "";
+}
+
+saveBtn.onclick=async()=>{
+  const start=parseFloat(sEl.value),end=parseFloat(eEl.value);
+  if(isNaN(start)||isNaN(end)||start<0||end<=start||end>dur+0.05){
+    alert("구간을 올바르게 입력해주세요.");
+    return;
+  }
+
+  // 구간을 바꾸지 않았으면 원본 그대로 저장
+  if(start<0.05&&end>=dur-0.1){
+    const b=await(await fetch(srcUrl)).blob();
+    download(b,makeName(ext));
+    return;
+  }
+
+  const mime=pickMime();
+  if(!mime){alert("이 브라우저는 MediaRecorder를 지원하지 않습니다.");return;}
+
+  saveBtn.disabled=true;
+  pw.style.display="block";
+  lbl.textContent="재인코딩 중... 0%";
+  fill.style.width="0%";
+
+  try{
+    v.pause();
+
+    // 재생 소리를 스피커로 내보내지 않고 오디오만 캡처하기 위해 WebAudio를 거친다.
+    if(!ac){
+      ac=new AudioContext();
+      const src=ac.createMediaElementSource(v);
+      adest=ac.createMediaStreamDestination();
+      src.connect(adest);
+    }
+    await ac.resume();
+
+    await seekTo(start);
+
+    const stream=new MediaStream([...v.captureStream().getVideoTracks(),...adest.stream.getAudioTracks()]);
+    const bitrate=Math.max(2000000,Math.round(origBytes*8/dur*1.2));
+    const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:bitrate,audioBitsPerSecond:192000});
+    const chunks=[];
+    rec.ondataavailable=(ev)=>{if(ev.data&&ev.data.size>0)chunks.push(ev.data);};
+    const stopped=new Promise((r)=>{rec.onstop=r;});
+
+    rec.start(250);
+    await v.play();
+
+    const timer=setInterval(()=>{
+      const p=Math.max(0,Math.min(1,(v.currentTime-start)/(end-start)));
+      lbl.textContent="재인코딩 중... "+Math.round(p*100)+"%";
+      fill.style.width=Math.round(p*100)+"%";
+      if(v.currentTime>=end||v.ended||v.paused){
+        clearInterval(timer);
+        v.pause();
+        if(rec.state!=="inactive")rec.stop();
+      }
+    },30);
+
+    await stopped;
+
+    const outExt=mime.indexOf("mp4")>=0?"mp4":"webm";
+    download(new Blob(chunks,{type:mime.split(";")[0]}),makeName(outExt));
+    fill.style.width="100%";
+    lbl.textContent="완료! 다운로드 폴더를 확인하세요.";
+  }catch(err){
+    console.error(err);
+    alert("저장 실패: "+(err&&err.message?err.message:err));
+    lbl.textContent="저장 실패";
+  }
+  saveBtn.disabled=false;
+};
+</script></body></html>`;
+
+        const blobUrl = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+
+        GM_openInTab(blobUrl, { active: true, insert: true, setParent: true });
     }
 
     // ===========================================================
